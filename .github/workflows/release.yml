@@ -359,10 +359,23 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         shell: pwsh
         run: |
-          $installer = Get-ChildItem "C:\b\release\bundle\nsis\*.exe" | Select-Object -First 1
-          [IO.File]::WriteAllText("$env:TEMP\tauri.key", $env:TAURI_SIGNING_PRIVATE_KEY)
-          pnpm tauri signer sign --private-key-path "$env:TEMP\tauri.key" --password="$($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)" "$($installer.FullName)"
-          Remove-Item "$env:TEMP\tauri.key"
+          $installer = Get-ChildItem "C:\b\release\bundle\nsis\*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) {
+            throw "No NSIS installer found at C:\b\release\bundle\nsis\*.exe"
+          }
+
+          $keyPath = "$env:TEMP\tauri.key"
+          [IO.File]::WriteAllText($keyPath, $env:TAURI_SIGNING_PRIVATE_KEY)
+
+          try {
+            if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+              pnpm tauri signer sign --private-key-path "$keyPath" "$($installer.FullName)"
+            } else {
+              pnpm tauri signer sign --private-key-path "$keyPath" --password "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$($installer.FullName)"
+            }
+          } finally {
+            Remove-Item "$keyPath" -ErrorAction SilentlyContinue
+          }
 
       - name: Stage artifacts for upload
         shell: pwsh
