@@ -403,10 +403,21 @@ jobs:
           [IO.File]::WriteAllText($keyPath, $env:TAURI_SIGNING_PRIVATE_KEY)
 
           try {
-            if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
-              pnpm tauri signer sign --private-key-path "$keyPath" "$($installer.FullName)"
+            $password = "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+            $signArgs = @("tauri", "signer", "sign", "--private-key-path", $keyPath)
+
+            if ([string]::IsNullOrWhiteSpace($password)) {
+              Write-Host "Signing with explicit empty password."
+              $signArgs += "--password="
             } else {
-              pnpm tauri signer sign --private-key-path "$keyPath" --password "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$($installer.FullName)"
+              $signArgs += "--password=$password"
+            }
+
+            $signArgs += "$($installer.FullName)"
+            & pnpm @signArgs
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "tauri signer failed with exit code $LASTEXITCODE"
             }
           } finally {
             Remove-Item "$keyPath" -ErrorAction SilentlyContinue
