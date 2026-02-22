@@ -23,16 +23,14 @@ env:
 
 jobs:
   # ===========================================
-  # Prepare: bump version, commit, tag, push
+  # Prepare: calculate version and validate
   # ===========================================
   prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
-      ref: ${{ steps.ref.outputs.ref }}
+      base_sha: ${{ steps.base.outputs.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,6 +49,11 @@ jobs:
           echo "tag=v$NEW" >> $GITHUB_OUTPUT
           echo "::notice::Release: $CURRENT → $NEW (${{ inputs.release_type }})"
 
+      - name: Capture base commit
+        id: base
+        run: |
+          echo "sha=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+
       - name: Check tag doesn't already exist
         if: ${{ !inputs.dry_run }}
         run: |
@@ -58,37 +61,6 @@ jobs:
           if git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
             echo "::error::Tag $TAG already exists. Delete it first or use a different release type."
             exit 1
-          fi
-
-      - name: Bump version files
-        if: ${{ !inputs.dry_run }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          node -e "
-            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
-            pkg.version = '$VERSION';
-            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          sed -i 's/^version = "[^"]*"/version = "'$VERSION'"/' src-tauri/Cargo.toml
-
-      - name: Commit, tag, and push
-        if: ${{ !inputs.dry_run }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json src-tauri/Cargo.toml
-          git diff --cached --stat
-          git commit -m "chore: release v${{ steps.version.outputs.version }}"
-          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-          git push origin main "v${{ steps.version.outputs.version }}"
-
-      - name: Determine checkout ref
-        id: ref
-        run: |
-          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
-            echo "ref=${{ github.sha }}" >> $GITHUB_OUTPUT
-          else
-            echo "ref=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           fi
 
   # ===========================================
@@ -101,7 +73,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          ref: ${{ needs.prepare.outputs.base_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -125,6 +97,17 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Apply release version
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          sed -i 's/^version = "[^"]*"/version = "'$VERSION'"/' src-tauri/Cargo.toml
 
       - name: Import Apple Certificate
         env:
@@ -208,7 +191,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          ref: ${{ needs.prepare.outputs.base_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -232,6 +215,17 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Apply release version
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          sed -i 's/^version = "[^"]*"/version = "'$VERSION'"/' src-tauri/Cargo.toml
 
       - name: Import Apple Certificate
         env:
@@ -306,7 +300,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          ref: ${{ needs.prepare.outputs.base_sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -335,6 +329,27 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Apply release version
+        shell: pwsh
+        run: |
+          $version = "${{ needs.prepare.outputs.version }}"
+          $env:RELEASE_VERSION = $version
+
+          node -e "
+            const fs = require('fs');
+            const v = process.env.RELEASE_VERSION;
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = v;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          $cargoToml = Get-Content "src-tauri/Cargo.toml" -Raw
+          $updated = [regex]::Replace($cargoToml, '(?m)^version = "[^"]*"', "version = `"$version`"", 1)
+          if ($updated -eq $cargoToml) {
+            throw "Failed to update version in src-tauri/Cargo.toml"
+          }
+          Set-Content "src-tauri/Cargo.toml" $updated -Encoding utf8NoBOM
 
       - name: Ensure FFmpeg sidecar
         run: pnpm run sidecar:ensure-ffmpeg
@@ -392,10 +407,67 @@ jobs:
           retention-days: 5
 
   # ===========================================
-  # Create Release (after all builds succeed)
+  # Publish: bump version, commit, tag, push
+  # ===========================================
+  publish:
+    needs: [prepare, build-macos-aarch64, build-macos-x86_64, build-windows]
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: write
+    outputs:
+      ref: ${{ steps.push.outputs.ref }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Ensure main did not move during build
+        run: |
+          BASE_SHA="${{ needs.prepare.outputs.base_sha }}"
+          CURRENT_SHA="$(git rev-parse HEAD)"
+          if [[ "$CURRENT_SHA" != "$BASE_SHA" ]]; then
+            echo "::error::main moved from $BASE_SHA to $CURRENT_SHA while builds were running. Re-run release from latest main."
+            exit 1
+          fi
+
+      - name: Ensure tag doesn't already exist
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG"; then
+            echo "::error::Tag $TAG already exists. Re-run with a different release type."
+            exit 1
+          fi
+
+      - name: Bump version files
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          node -e "
+            const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          sed -i 's/^version = "[^"]*"/version = "'$VERSION'"/' src-tauri/Cargo.toml
+
+      - name: Commit, tag, and push
+        id: push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json src-tauri/Cargo.toml
+          git diff --cached --stat
+          git commit -m "chore: release v${{ needs.prepare.outputs.version }}"
+          git tag -a "${{ needs.prepare.outputs.tag }}" -m "Release ${{ needs.prepare.outputs.tag }}"
+          git push origin main "${{ needs.prepare.outputs.tag }}"
+          echo "ref=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+  # ===========================================
+  # Create Release (after publish succeeds)
   # ===========================================
   release:
-    needs: [prepare, build-macos-aarch64, build-macos-x86_64, build-windows]
+    needs: [prepare, build-macos-aarch64, build-macos-x86_64, build-windows, publish]
     runs-on: ubuntu-latest
     if: ${{ !inputs.dry_run }}
     permissions:
@@ -404,7 +476,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          ref: ${{ needs.publish.outputs.ref }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
