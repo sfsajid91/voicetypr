@@ -304,5 +304,50 @@ function verifyChecksum(file, expected, label) {
     return;
   }
 
+  if (process.platform === 'linux') {
+    const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+    const triple = `${arch}-unknown-linux-gnu`;
+    const ffmpegDst = path.join(distDir, `ffmpeg-${triple}`);
+    const ffprobeDst = path.join(distDir, `ffprobe-${triple}`);
+
+    if (fs.existsSync(ffmpegDst) && fs.existsSync(ffprobeDst)) {
+      console.log(`[ensure-ffmpeg-sidecar] ffmpeg/ffprobe sidecars present for Linux (${triple}).`);
+      return;
+    }
+
+    // Download static Linux builds from BtbN/FFmpeg-Builds
+    const archSuffix = arch === 'aarch64' ? 'linuxarm64' : 'linux64';
+    const tarUrl = process.env.FFMPEG_LINUX_URL ||
+      `https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${archSuffix}-gpl.tar.xz`;
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fftools-linux-'));
+    try {
+      const tarFile = path.join(tmp, 'ffmpeg.tar.xz');
+      download(tarUrl, tarFile);
+
+      // Extract tar.xz
+      const outDir = path.join(tmp, 'out');
+      ensureDir(outDir);
+      run('tar', ['-xJf', tarFile, '-C', outDir]);
+
+      // Find the bin directory inside the extracted archive
+      const entries = fs.readdirSync(outDir);
+      const root = entries.find((e) => e.startsWith('ffmpeg-') && fs.statSync(path.join(outDir, e)).isDirectory());
+      if (!root) fail('Unexpected archive structure for Linux ffmpeg build.');
+      const binDir = path.join(outDir, root, 'bin');
+      const srcFfmpeg = path.join(binDir, 'ffmpeg');
+      const srcFfprobe = path.join(binDir, 'ffprobe');
+      if (!fs.existsSync(srcFfmpeg) || !fs.existsSync(srcFfprobe)) {
+        fail('Downloaded Linux archive missing ffmpeg/ffprobe binaries.');
+      }
+      fs.copyFileSync(srcFfmpeg, ffmpegDst); chmodx(ffmpegDst);
+      fs.copyFileSync(srcFfprobe, ffprobeDst); chmodx(ffprobeDst);
+      console.log(`[ensure-ffmpeg-sidecar] Installed Linux sidecar binaries for ${triple}.`);
+    } finally {
+      cleanupTmp(tmp);
+    }
+    return;
+  }
+
   console.warn('[ensure-ffmpeg-sidecar] Unsupported platform for auto-install; please place binaries under sidecar/ffmpeg/dist/.');
 })();

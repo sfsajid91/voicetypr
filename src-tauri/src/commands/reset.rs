@@ -183,6 +183,25 @@ pub async fn reset_app_data(app: AppHandle) -> Result<ResetResult, String> {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux, clear dconf / GSettings entries if they exist
+        // This is best-effort; failure is not critical
+        match std::process::Command::new("dconf")
+            .args(["reset", "-f", &format!("/com/ideaplexa/{}/", app_identifier)])
+            .output()
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    cleared_items.push("GSettings/dconf preferences".to_string());
+                }
+            }
+            Err(_) => {
+                // dconf may not be installed; not an error
+            }
+        }
+    }
+
     #[cfg(target_os = "windows")]
     {
         // Windows Registry cleanup
@@ -322,6 +341,12 @@ pub async fn reset_app_data(app: AppHandle) -> Result<ResetResult, String> {
     {
         // Windows doesn't have centralized permissions like macOS
         cleared_items.push("System permissions (N/A on Windows)".to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux doesn't have centralized permissions like macOS
+        cleared_items.push("System permissions (N/A on Linux)".to_string());
     }
 
     // 8. Clear any runtime state

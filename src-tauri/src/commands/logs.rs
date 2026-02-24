@@ -93,5 +93,13 @@ pub async fn open_logs_folder(app: tauri::AppHandle) -> Result<(), String> {
             .map_err(|e| format!("Failed to open folder: {}", e))?;
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&log_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {}", e))?;
+    }
+
     Ok(())
 }
