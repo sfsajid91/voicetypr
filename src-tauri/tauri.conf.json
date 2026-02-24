@@ -42,7 +42,9 @@
     "targets": [
       "nsis",
       "app",
-      "dmg"
+      "dmg",
+      "appimage",
+      "rpm"
     ],
     "externalBin": [
       "../sidecar/ffmpeg/dist/ffmpeg",

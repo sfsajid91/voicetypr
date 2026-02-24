@@ -105,5 +105,27 @@ fn main() {
         }
     }
 
+    // On Linux, verify ffmpeg sidecars exist
+    #[cfg(target_os = "linux")]
+    {
+        let ffmpeg_dir = std::path::Path::new("../sidecar/ffmpeg/dist");
+        let target = std::env::var("TARGET")
+            .unwrap_or_else(|_| "x86_64-unknown-linux-gnu".to_string());
+        let ffmpeg = ffmpeg_dir.join(format!("ffmpeg-{}", target));
+        let ffprobe = ffmpeg_dir.join(format!("ffprobe-{}", target));
+        if !ffmpeg.exists() {
+            panic!(
+                "FFmpeg sidecar missing: {}. Run `pnpm run sidecar:ensure-ffmpeg` to install it.",
+                ffmpeg.display()
+            );
+        }
+        if !ffprobe.exists() {
+            panic!(
+                "FFprobe sidecar missing: {}. Run `pnpm run sidecar:ensure-ffmpeg` to install it.",
+                ffprobe.display()
+            );
+        }
+    }
+
     tauri_build::build()
 }

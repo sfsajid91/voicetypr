@@ -438,10 +438,124 @@ jobs:
           retention-days: 5
 
   # ===========================================
+  # Build Linux (x86_64 - AppImage + RPM for Fedora)
+  # ===========================================
+  build-linux:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 10.13.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            rpm \
+            libssl-dev \
+            pkg-config \
+            libxdo-dev \
+            libxtst-dev \
+            libx11-dev \
+            xdotool
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Apply release version
+        run: |
+          export RELEASE_VERSION="${{ needs.prepare.outputs.version }}"
+          node -e '
+            const fs = require("fs");
+            const version = process.env.RELEASE_VERSION;
+            const pkgPath = "package.json";
+            const cargoPath = "src-tauri/Cargo.toml";
+
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+            pkg.version = version;
+            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+
+            const cargo = fs.readFileSync(cargoPath, "utf8");
+            const updated = cargo.replace(/^version = "[^"]*"/m, `version = "${version}"`);
+            if (updated === cargo) {
+              throw new Error("Failed to update version in src-tauri/Cargo.toml");
+            }
+            fs.writeFileSync(cargoPath, updated);
+          '
+
+      - name: Ensure FFmpeg sidecar
+        run: pnpm run sidecar:ensure-ffmpeg
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles appimage,rpm --config src-tauri/tauri.linux.conf.json --ci --verbose
+
+      - name: Sign AppImage for updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: |
+          APPIMAGE=$(find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -name "*.AppImage" | head -1)
+          if [ -z "$APPIMAGE" ]; then
+            echo "::error::No AppImage found"
+            exit 1
+          fi
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/tauri.key
+          pnpm tauri signer sign -f /tmp/tauri.key -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" "$APPIMAGE"
+          rm /tmp/tauri.key
+
+      - name: Stage artifacts for upload
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          mkdir -p artifacts
+          find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -name "*.AppImage" ! -name "*.sig" -exec cp {} artifacts/ \;
+          find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage -name "*.AppImage.sig" -exec cp {} artifacts/ \;
+          RPM=$(find src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm -name "*.rpm" | head -1)
+          if [ -n "$RPM" ]; then
+            cp "$RPM" "artifacts/VoiceTypr_${VERSION}_x86_64.rpm"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/
+          retention-days: 5
+
+  # ===========================================
   # Publish: bump version, commit, tag, push
   # ===========================================
   publish:
-    needs: [prepare, build-macos-aarch64, build-macos-x86_64, build-windows]
+    needs: [prepare, build-macos-aarch64, build-macos-x86_64, build-windows, build-linux]
     runs-on: ubuntu-latest
     if: ${{ !inputs.dry_run }}
     permissions:
@@ -509,7 +623,7 @@ jobs:
   # Create Release (after publish succeeds)
   # ===========================================
   release:
-    needs: [prepare, build-macos-aarch64, build-macos-x86_64, build-windows, publish]
+    needs: [prepare, build-macos-aarch64, build-macos-x86_64, build-windows, build-linux, publish]
     runs-on: ubuntu-latest
     if: ${{ !inputs.dry_run }}
     permissions:
@@ -544,6 +658,20 @@ jobs:
           cp artifacts/windows-x64/*.exe "release/VoiceTypr_${VERSION}_x64-setup.exe"
           cp artifacts/windows-x64/*.exe.sig "release/VoiceTypr_${VERSION}_x64-setup.exe.sig"
 
+          # Linux x86_64
+          LINUX_APPIMAGE=$(find artifacts/linux-x86_64 -name "*.AppImage" ! -name "*.sig" | head -1)
+          LINUX_APPIMAGE_SIG=$(find artifacts/linux-x86_64 -name "*.AppImage.sig" | head -1)
+          if [ -n "$LINUX_APPIMAGE" ]; then
+            cp "$LINUX_APPIMAGE" "release/VoiceTypr_${VERSION}_x86_64.AppImage"
+          fi
+          if [ -n "$LINUX_APPIMAGE_SIG" ]; then
+            cp "$LINUX_APPIMAGE_SIG" "release/VoiceTypr_${VERSION}_x86_64.AppImage.sig"
+          fi
+          LINUX_RPM=$(find artifacts/linux-x86_64 -name "*.rpm" | head -1)
+          if [ -n "$LINUX_RPM" ]; then
+            cp "$LINUX_RPM" "release/VoiceTypr_${VERSION}_x86_64.rpm"
+          fi
+
       - name: Generate latest.json
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
@@ -552,8 +680,9 @@ jobs:
           AARCH64_SIG=$(cat "release/VoiceTypr_${VERSION}_aarch64.app.tar.gz.sig" | tr -d '\n')
           X86_64_SIG=$(cat "release/VoiceTypr_${VERSION}_x86_64.app.tar.gz.sig" | tr -d '\n')
           WINDOWS_SIG=$(cat "release/VoiceTypr_${VERSION}_x64-setup.exe.sig" | tr -d '\n')
+          LINUX_SIG=$(cat "release/VoiceTypr_${VERSION}_x86_64.AppImage.sig" | tr -d '\n')
 
-          if [ -z "$AARCH64_SIG" ] || [ -z "$X86_64_SIG" ] || [ -z "$WINDOWS_SIG" ]; then
+          if [ -z "$AARCH64_SIG" ] || [ -z "$X86_64_SIG" ] || [ -z "$WINDOWS_SIG" ] || [ -z "$LINUX_SIG" ]; then
             echo "::error::One or more signature files are missing or empty"
             exit 1
           fi
@@ -568,6 +697,8 @@ jobs:
             --arg x86_64_url "https://github.com/${{ github.repository }}/releases/download/$TAG/VoiceTypr_${VERSION}_x86_64.app.tar.gz" \
             --arg windows_sig "$WINDOWS_SIG" \
             --arg windows_url "https://github.com/${{ github.repository }}/releases/download/$TAG/VoiceTypr_${VERSION}_x64-setup.exe" \
+            --arg linux_sig "$LINUX_SIG" \
+            --arg linux_url "https://github.com/${{ github.repository }}/releases/download/$TAG/VoiceTypr_${VERSION}_x86_64.AppImage" \
             '{
               version: $version,
               notes: $notes,
@@ -575,7 +706,8 @@ jobs:
               platforms: {
                 "darwin-aarch64": { signature: $aarch64_sig, url: $aarch64_url },
                 "darwin-x86_64": { signature: $x86_64_sig, url: $x86_64_url },
-                "windows-x86_64": { signature: $windows_sig, url: $windows_url }
+                "windows-x86_64": { signature: $windows_sig, url: $windows_url },
+                "linux-x86_64": { signature: $linux_sig, url: $linux_url }
               }
             }' > release/latest.json
 
